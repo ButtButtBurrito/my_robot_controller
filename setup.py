@@ -37,7 +37,10 @@ setup(
             "calibration_gui = my_robot_controller.calibration_gui:main",
             "aruco_sequence = my_robot_controller.aruco_sequence:main",
             "eye_in_hand_practice = my_robot_controller.eye_in_hand_practice:main",
-            "eye_in_hand_v2 = my_robot_controller.eye_in_hand_v2:main"
+            "eye_in_hand_v2 = my_robot_controller.eye_in_hand_v2:main",
+            "pick_and_place = my_robot_controller.pick_and_place:main",
+            "skill_server = my_robot_controller.skill_server:main",
+            "scene_map = my_robot_controller.scene_map:main"
         
         ],
     },

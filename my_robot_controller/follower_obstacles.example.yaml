@@ -1,0 +1,45 @@
+# Example obstacle file for marker_follower.py (and any MoveIt planning).
+#
+# ACTIVATE:   cp follower_obstacles.example.yaml ~/.ros2/follower_obstacles.yaml
+# then edit positions to match where your real/virtual objects are.
+# marker_follower loads it at startup into the MoveIt planning scene; all its
+# IK + Cartesian planning avoids these shapes, so the arm stops short of them.
+# View in RViz: PlanningScene / MotionPlanning display, or the translucent red
+# mirrors on /follower/viz (MarkerArray).
+#
+# marker_follower removes them again on clean exit (Stop Script). After a hard
+# kill, run:  python3 marker_follower.py --clear-obstacles   (or restart MoveIt)
+# — leftovers silently block planning for OTHER scripts (pick_and_place!).
+#
+# All positions/dims in metres, base_link frame, position = shape CENTRE.
+# rpy_deg (optional) = roll/pitch/yaw in degrees.
+
+obstacles:
+  # A 10 cm cube sitting on the table, 30 cm in front of the base:
+  - id: test_box
+    type: box
+    position: [0.30, 0.15, 0.05]
+    dims: [0.10, 0.10, 0.10]
+    rpy_deg: [0, 0, 0]
+
+  # A vertical pillar (uncomment to use):
+  # - id: pillar
+  #   type: cylinder
+  #   position: [0.25, -0.20, 0.15]
+  #   height: 0.30
+  #   radius: 0.04
+
+  # A ball:
+  # - id: ball
+  #   type: sphere
+  #   position: [0.40, 0.00, 0.10]
+  #   radius: 0.06
+
+  # Your own custom model (STL, binary or ASCII). `scale: 0.001` converts an
+  # STL exported in millimetres to metres — most CAD exports need this:
+  # - id: my_model
+  #   type: mesh
+  #   file: ~/models/my_model.stl
+  #   scale: 0.001
+  #   position: [0.35, -0.10, 0.00]
+  #   rpy_deg: [0, 0, 90]
