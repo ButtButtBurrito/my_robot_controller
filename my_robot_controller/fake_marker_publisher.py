@@ -51,6 +51,7 @@ from tf2_ros import Buffer, TransformListener
 from aruco_msgs.msg import Marker as ArucoMarker
 from aruco_msgs.msg import MarkerArray as ArucoMarkerArray
 from sensor_msgs.msg import JointState
+from std_srvs.srv import SetBool
 from visualization_msgs.msg import Marker, MarkerArray
 
 from my_robot_controller.eih_core import CAM_T, R_LINK6_CAM, EFFECTOR_LINK
@@ -63,19 +64,21 @@ from my_robot_controller.eih_core import CAM_T, R_LINK6_CAM, EFFECTOR_LINK
 MARKER_A_ID   = 100      # (sync) pick station
 MARKER_B_ID   = 101      # (sync) place station
 MARKER_C_ID   = 582      # (sync) on top of the object
-OBJECT_DIMS_M = (0.0254, 0.0254, 0.0254)   # (sync) cube x, y, z
+OBJECT_DIMS_M = (0.03, 0.03, 0.03)   # (sync) cube x, y, z (measured 2026-07-16)
 TCP_OFFSET_Z  = 0.175    # (sync) used only to simulate the grasp attach point
 MARKER_SIZE_M = 0.047    # (sync) the ONE size the detector assumes
 # (sync) per-id TRUE printed size. A real detector assuming MARKER_SIZE_M for
 # a marker actually printed at TRUE_SIZE_M[id] reports its position scaled by
 # MARKER_SIZE_M / TRUE_SIZE_M[id]; this publisher simulates that mis-scale so
 # pick_and_place's TRUE_SIZE_M correction is exercised by the mock test.
-TRUE_SIZE_M: dict[int, float] = {}
+TRUE_SIZE_M: dict[int, float] = {MARKER_C_ID: 0.021}
 
 TABLE_Z      = 0.0                 # markers lie flat at this height
 STATION_A_XY = (0.28, -0.12)
 STATION_B_XY = (0.28, +0.12)
-OBJECT_XY    = (0.30, -0.09)       # near station A, like the real layout
+OBJECT_XY    = (0.26, -0.02)       # r≈0.26 — inside the straight-down IK
+                                   # envelope ([[Joint5 Reach Limit]]: r≈0.31+
+                                   # has no vertical IK; matches live layout)
 OBJECT_YAW_DEG = 20.0              # non-zero to exercise roll alignment
 
 NOISE_POS_STD_M   = 0.0015         # per-axis gaussian on detections
@@ -106,6 +109,11 @@ class FakeMarkerPublisher(Node):
         self._viz_pub = self.create_publisher(MarkerArray, '/fake_markers/viz', 10)
         self.create_subscription(JointState, 'control/joint_states',
                                  self._on_control_joint_state, 10)
+        # Mock stand-in for the arm driver's /control_enable gate (the real
+        # SetBool service only exists when agx_arm_ctrl is up, so without this
+        # every EXECUTE run aborts at the pre-motion gate in the mock stack).
+        self._gate_srv = self.create_service(SetBool, '/control_enable',
+                                             self._on_control_enable)
 
         self._lock = threading.Lock()
         # object state (marker C sits on the top face)
@@ -128,6 +136,12 @@ class FakeMarkerPublisher(Node):
     def _log(self, msg: str, level: str = 'INFO'):
         ts = time.strftime('%H:%M:%S')
         print(f'[{ts}] {level}: {msg}', flush=True)
+
+    def _on_control_enable(self, request, response):
+        self._log(f'[GATE] /control_enable(data={request.data}) → mock OK')
+        response.success = True
+        response.message = 'mock gate (fake_marker_publisher)'
+        return response
 
     # ── Arm / camera pose ─────────────────────────────────────────────────────
 

@@ -79,7 +79,7 @@ TARGETS = {
     'station_A': {'marker_id': 100, 'type': 'station'},
     'station_B': {'marker_id': 101, 'type': 'station'},
     'obj_C':     {'marker_id': 582, 'type': 'object',
-                  'dims': (0.0254, 0.0254, 0.0254)},   # 1-inch cube
+                  'dims': (0.03, 0.03, 0.03)},   # 3 cm cube (measured 2026-07-16)
 }
 
 # Reachable table volume (base_link, metres) — resolved target positions
@@ -535,7 +535,7 @@ def _selftest() -> int:
     node.enable_control_gate = lambda: True
     node.tracker.inject(100, [0.30, -0.10, 0.02])
     node.tracker.inject(101, [0.30, +0.10, 0.02])
-    node.tracker.inject(582, [0.30, -0.10, 0.02 + 0.0254], yaw_deg=20.0)
+    node.tracker.inject(582, [0.30, -0.10, 0.02 + 0.03], yaw_deg=20.0)
 
     fails = 0
     def check(name, cond, detail=''):
