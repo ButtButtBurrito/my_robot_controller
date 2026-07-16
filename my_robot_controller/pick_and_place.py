@@ -2,14 +2,17 @@
 """
 Pick-and-place practice — AGX Piper / RealSense D435 (headless, GUI-run).
 
-Three ArUco markers:
-  A (MARKER_A_ID) — pick station on the table (waypoint; the object sits here)
-  B (MARKER_B_ID) — place station on the table (goal)
-  C (MARKER_C_ID) — on TOP of the object (dimensions in OBJECT_DIMS_M)
+Markers (only B and C are required — A was dropped from the pipeline
+2026-07-16 per the 2026-07-12 design; it may stay taped as a topdown anchor):
+  B (MARKER_B_ID) — place station on the table (goal, never covered at scan)
+  C (MARKER_C_ID) — on TOP of the object (dimensions in OBJECT_DIMS_M);
+                    the pick target comes entirely from C, wherever it sits
 
 Sequence:
-  SCAN      wait until A and B are detected (C may come later)
-  HOVER_A   move the camera above A (look-at sweep) and re-detect C precisely
+  SCAN      measure station B live, re-measure after a settle delay
+            (stability gate), z-sanity gate, straight-down place IK probe —
+            all BEFORE any motion; then prompt to place the object
+  SCAN_C    wait for C (up to WAIT_OBJECT_TIMEOUT_S — time to put it down)
   PICK      pre-grasp above the object → open gripper → straight descend →
             close on the object → attach collision box → lift
   PLACE     move above B → straight descend until the object sits on the
@@ -98,17 +101,20 @@ MARKER_SIZE_M = 0.047
 # the same detector mis-scale and tests this correction.)
 TRUE_SIZE_M: dict[int, float] = {MARKER_C_ID: 0.021}
 
-# Measured station positions (base_link, metres) — set these so the object
-# (marker C) can sit directly on top of station A without hiding it; once
-# set, A/B are never re-detected live, only C is.
-#   Capture once, with the table CLEAR and A/B both visible:
-#     python3 pick_and_place.py --capture-stations
-#   then paste the two printed lines here. Leave both None to fall back to
-#   live SCAN of A and B (only works if the object doesn't cover them).
-STATION_A_XYZ = (0.342, 0.052, 0.0005)
-   # e.g. (0.280, -0.120, 0.000)
-STATION_B_XYZ = (0.288, -0.069, -0.035)
-   # e.g. (0.280, +0.120, 0.000)
+# Stations are detected LIVE each run (de-hardcoded 2026-07-16 per the
+# 2026-07-12 design): marker A is NOT needed by this pipeline at all — the
+# pick target comes entirely from C, and the table height / sanity checks /
+# collision centre all come from B, which is never occluded at scan time
+# (the object only arrives there at the end). The object may therefore sit
+# on station A from the start; nothing has to be uncovered. A=100 can stay
+# taped as a topdown anchor; if visible it is logged as a cross-check only.
+#   Optional override (debug/repeatability): set STATION_B_XYZ to freeze B,
+#   e.g. from a --capture-stations printout. None = live detection.
+STATION_B_XYZ = None
+   # e.g. (0.288, -0.069, -0.035)
+# Station-B measurement validation (before anything else runs):
+STATION_RESAMPLE_S     = 2.0    # settle, then re-measure B after this long
+STATION_STABLE_TOL_M   = 0.010  # the two reads must agree within this
 
 # Object under marker C. Default: 3×3×3 cm cube. Marker C sits on its top
 # face, so object centre = C − (0, 0, height/2).
@@ -141,6 +147,9 @@ GRIPPER_SETTLE_S  = 2.0     # wait after a gripper command
 MARKER_FRESH_S       = 2.0  # how recent a detection must be to be used
 MARKER_MEDIAN_WINDOW = 5    # median filter over this many detections
 WAIT_MARKERS_TIMEOUT_S = 60.0
+WAIT_OBJECT_TIMEOUT_S  = 60.0  # time to place the object (marker C) after
+                               # station B is verified — the run prompts and
+                               # starts as soon as C is detected stably
 
 # Vision sanity gates (lesson from pick_and_place_topdown 2026-07-04: a broken
 # pixel→base map put the grasp target 190 m away and the only symptom was
@@ -230,9 +239,10 @@ class PickAndPlaceNode(EihBaseNode):
 
         mode = 'EXECUTE' if EXECUTE else 'PLAN-ONLY (no motion; set EXECUTE=True when happy)'
         self._log(f'Mode: {mode}')
-        self._log(f'Markers: A={MARKER_A_ID} (pick), B={MARKER_B_ID} (place), '
+        self._log(f'Markers: B={MARKER_B_ID} (place), '
                   f'C={MARKER_C_ID} (object {OBJECT_DIMS_M[0]*1000:.0f}×'
-                  f'{OBJECT_DIMS_M[1]*1000:.0f}×{OBJECT_DIMS_M[2]*1000:.0f} mm)')
+                  f'{OBJECT_DIMS_M[1]*1000:.0f}×{OBJECT_DIMS_M[2]*1000:.0f} mm); '
+                  f'A={MARKER_A_ID} informational only (not required)')
 
     # ── Detection ─────────────────────────────────────────────────────────────
 
@@ -542,51 +552,84 @@ class PickAndPlaceNode(EihBaseNode):
         start_sol = (self.current_arm_joints()
                      if (EXECUTE and HOME_AFTER_RUN) else None)
 
-        # ── SCAN ──
-        if STATION_A_XYZ is not None and STATION_B_XYZ is not None:
-            a = np.array(STATION_A_XYZ, dtype=float)
+        # ── SCAN: station B only (2026-07-12 design — A is not needed: the
+        # pick target comes entirely from C; table z / sanity / collision
+        # centre come from B, which the object never covers at scan time) ──
+        if STATION_B_XYZ is not None:
             b = np.array(STATION_B_XYZ, dtype=float)
-            self.status('SCAN: using measured stations (not re-detected)')
-            self._log(f'[SCAN] A (measured) at ({a[0]:+.3f}, {a[1]:+.3f}, {a[2]:+.3f})')
-            self._log(f'[SCAN] B (measured) at ({b[0]:+.3f}, {b[1]:+.3f}, {b[2]:+.3f})')
+            self.status('SCAN: using frozen station B (override set)')
+            self._log(f'[SCAN] B (override) at ({b[0]:+.3f}, {b[1]:+.3f}, {b[2]:+.3f})')
         else:
-            self.status('SCAN: waiting for markers A and B')
-            if not self.wait_for_markers([MARKER_A_ID, MARKER_B_ID],
-                                         WAIT_MARKERS_TIMEOUT_S):
-                self._log('Markers A/B never seen — aborting. Are they printed at '
-                          f'{MARKER_SIZE_M} m and in the camera view? Is '
-                          'marker_publisher receiving images? If the object '
-                          'already covers station A, clear the table and run '
-                          '--capture-stations once, then set STATION_A_XYZ/'
-                          'STATION_B_XYZ so A/B never need live detection again.',
-                          'ERROR')
+            self.status('SCAN: measuring place station B')
+            if not self.wait_for_markers([MARKER_B_ID], WAIT_MARKERS_TIMEOUT_S,
+                                         min_samples=MARKER_MEDIAN_WINDOW):
+                self._log('Marker B never seen — aborting. Is it printed at '
+                          f'{MARKER_SIZE_M} m, uncovered and in the camera '
+                          'view from the start pose? Is marker_publisher '
+                          'receiving images?', 'ERROR')
                 return False
-            a = self.get_marker(MARKER_A_ID).position
+            b1 = self.get_marker(MARKER_B_ID).position
+            # Measurement-stability gate: re-measure after a settle delay and
+            # require agreement — catches motion smear, a jostled phone/arm,
+            # or a marker still being taped down mid-scan.
+            self._log(f'[SCAN] B first read ({b1[0]:+.3f}, {b1[1]:+.3f}, '
+                      f'{b1[2]:+.3f}); re-measuring in '
+                      f'{STATION_RESAMPLE_S:.0f}s to confirm...')
+            time.sleep(STATION_RESAMPLE_S)
+            self.flush_markers()
+            if not self.wait_for_markers([MARKER_B_ID], 10.0,
+                                         min_samples=MARKER_MEDIAN_WINDOW):
+                self._log('[SCAN] Station B vanished during the stability '
+                          're-measure — aborting.', 'ERROR')
+                return False
             b = self.get_marker(MARKER_B_ID).position
-            self._log(f'[SCAN] A at ({a[0]:+.3f}, {a[1]:+.3f}, {a[2]:+.3f})')
-            self._log(f'[SCAN] B at ({b[0]:+.3f}, {b[1]:+.3f}, {b[2]:+.3f})')
-        for name, p in (('A', a), ('B', b)):
-            if not self.sane_target(p, 'SCAN'):
+            drift = float(np.linalg.norm(b - b1))
+            if drift > STATION_STABLE_TOL_M:
+                self._log(f'[SCAN] Station B unstable: two reads '
+                          f'{STATION_RESAMPLE_S:.0f}s apart disagree by '
+                          f'{drift*1000:.0f} mm (tol '
+                          f'{STATION_STABLE_TOL_M*1000:.0f}) — is the camera '
+                          'or table still moving? Aborting.', 'ERROR')
                 return False
-            if abs(p[2]) > STATION_Z_TOL_M:
-                msg = (f'[SCAN] Station {name} detected at z={p[2]:+.3f} m, '
-                       'but the arm stands on the table (expect ≈0) — '
-                       'hand-eye calibration, marker_size or the TF chain '
-                       'is off.')
-                if EXECUTE:
-                    self._log(msg + ' Refusing to EXECUTE.', 'ERROR')
-                    return False
-                self._log(msg, 'WARN')
+            self._log(f'[SCAN] B stable at ({b[0]:+.3f}, {b[1]:+.3f}, '
+                      f'{b[2]:+.3f}) (drift {drift*1000:.1f} mm)')
+        if not self.sane_target(b, 'SCAN'):
+            return False
+        if abs(b[2]) > STATION_Z_TOL_M:
+            msg = (f'[SCAN] Station B detected at z={b[2]:+.3f} m, '
+                   'but the arm stands on the table (expect ≈0) — '
+                   'hand-eye calibration, marker_size or the TF chain '
+                   'is off.')
+            if EXECUTE:
+                self._log(msg + ' Refusing to EXECUTE.', 'ERROR')
+                return False
+            self._log(msg, 'WARN')
+        # Early feasibility: a straight-down place at B must have IK NOW,
+        # before any motion — clearer than failing deep inside PLAN.
+        place_probe = self.find_grasp(
+            np.array([b[0], b[1], b[2] + OBJECT_DIMS_M[2] / 2 + PLACE_DROP_M]),
+            OBJECT_DIMS_M[2] / 2 + PRE_GRASP_CLEAR_M, 0.0, 'B_FEASIBLE')
+        if place_probe is None:
+            self._log('[SCAN] Station B is measured but NOT reachable for a '
+                      'straight-down place — move it closer to the base '
+                      '(keep x ≤ 0.26 m; Joint5 envelope).', 'ERROR')
+            return False
+        # A is optional: log it as a cross-check if it happens to be visible.
+        mk_a = self.get_marker(MARKER_A_ID)
+        if mk_a is not None:
+            self._log(f'[SCAN] A visible at ({mk_a.position[0]:+.3f}, '
+                      f'{mk_a.position[1]:+.3f}, {mk_a.position[2]:+.3f}) '
+                      '(cross-check only — A is not used).')
 
-        # ── HOVER over A to see the object precisely ──
+        # ── HOVER over B to see the table precisely ──
         if HOVER_BEFORE_SCAN:
-            self.status('HOVER_A: aiming camera above pick station')
-            hover = self.find_reachable_tool_pose(CAMERA_TOOL, a, SCAN_DIST_M,
-                                                  label='HOVER_A')
+            self.status('HOVER_B: aiming camera above place station')
+            hover = self.find_reachable_tool_pose(CAMERA_TOOL, b, SCAN_DIST_M,
+                                                  label='HOVER_B')
             if hover is None:
                 return False
             h_pos, h_R, h_l6p, h_l6q, h_sol, h_desc = hover
-            self.add_planned_pose_viz(h_pos, h_R, f'hover A ({h_desc})',
+            self.add_planned_pose_viz(h_pos, h_R, f'hover B ({h_desc})',
                                       (0.2, 0.4, 1.0, 0.9))
 
             if EXECUTE:
@@ -596,7 +639,7 @@ class PickAndPlaceNode(EihBaseNode):
                     return False
                 self._log(f'[PREVIEW] Moving in {CONFIRM_DELAY_S:.0f}s — check RViz now.')
                 time.sleep(CONFIRM_DELAY_S)
-                if not self.move_to(h_l6p, h_l6q, h_sol, 'HOVER_A'):
+                if not self.move_to(h_l6p, h_l6q, h_sol, 'HOVER_B'):
                     return False
                 time.sleep(1.0)   # let in-flight (mid-motion) detections drain
                 self.flush_markers()
@@ -606,7 +649,10 @@ class PickAndPlaceNode(EihBaseNode):
         # this script started — those detections carry motion smear exactly
         # like post-HOVER ones do (same reason flush_markers exists at all).
         self.flush_markers()
-        if not self.wait_for_markers([MARKER_C_ID], 15.0,
+        self._log('[SCAN_C] Station B verified. Place the object (marker C) '
+                  'on the pick spot now if it is not there yet — waiting up '
+                  f'to {WAIT_OBJECT_TIMEOUT_S:.0f}s for C.')
+        if not self.wait_for_markers([MARKER_C_ID], WAIT_OBJECT_TIMEOUT_S,
                                      min_samples=MARKER_MEDIAN_WINDOW):
             self._log('Marker C (object) not detected — is the cube in the '
                       'camera view from the start pose?', 'ERROR')
@@ -614,11 +660,11 @@ class PickAndPlaceNode(EihBaseNode):
         mk_c = self.get_marker(MARKER_C_ID)
         c = mk_c.position
         obj_centre = c - np.array([0, 0, OBJECT_DIMS_M[2] / 2])
-        table_z = float(min(a[2], b[2]))
+        table_z = float(b[2])
         self._log(f'[SCAN_C] C at ({c[0]:+.3f}, {c[1]:+.3f}, {c[2]:+.3f}), '
                   f'object centre z={obj_centre[2]:+.3f}, table z={table_z:+.3f}')
-        if abs((c[2] - OBJECT_DIMS_M[2]) - a[2]) > 0.02:
-            msg = ('[SCAN_C] Object height vs station-A height mismatch >2 cm — '
+        if abs((c[2] - OBJECT_DIMS_M[2]) - b[2]) > 0.02:
+            msg = ('[SCAN_C] Object height vs station-B height mismatch >2 cm — '
                    'check OBJECT_DIMS_M and marker detections.')
             if EXECUTE:
                 self._log(msg + ' Refusing to EXECUTE.', 'ERROR')
@@ -626,7 +672,7 @@ class PickAndPlaceNode(EihBaseNode):
             self._log(msg, 'WARN')
 
         if USE_TABLE_COLLISION:
-            self.scene_add_table(table_z, (a[:2] + b[:2]) / 2)
+            self.scene_add_table(table_z, (c[:2] + b[:2]) / 2)
 
         # ── Grasp + place geometry (all computed and validated up front) ──
         self.status('PLAN: computing grasp and place poses')
@@ -830,9 +876,10 @@ class PickAndPlaceNode(EihBaseNode):
         return None
 
     def capture_stations(self) -> bool:
-        """One-off, no motion: detect A and B live and print the constants to
-        paste into STATION_A_XYZ/STATION_B_XYZ. Run this with the table
-        CLEAR — it is the only time A needs to be visible ever again."""
+        """Diagnostic, no motion: print what the live SCAN would measure.
+        Stations are detected live per run since 2026-07-16 (B only — A is
+        not used by the pipeline); paste the B line into STATION_B_XYZ only
+        if you want to FREEZE it for repeatability testing."""
         self.ensure_detector()
         self.status('CAPTURE: waiting for markers A and B (table must be clear)')
         if not self.wait_for_markers([MARKER_A_ID, MARKER_B_ID],
@@ -842,9 +889,8 @@ class PickAndPlaceNode(EihBaseNode):
             return False
         a = self.get_marker(MARKER_A_ID).position
         b = self.get_marker(MARKER_B_ID).position
-        self._log('[CAPTURE] Paste these into pick_and_place.py, then place '
-                  'the object on station A freely:')
-        self._log(f'STATION_A_XYZ = ({a[0]:.4f}, {a[1]:.4f}, {a[2]:.4f})')
+        self._log('[CAPTURE] Live station readings (A is informational only):')
+        self._log(f'A = ({a[0]:.4f}, {a[1]:.4f}, {a[2]:.4f})')
         self._log(f'STATION_B_XYZ = ({b[0]:.4f}, {b[1]:.4f}, {b[2]:.4f})')
         return True
 

@@ -74,11 +74,15 @@ MARKER_SIZE_M = 0.047    # (sync) the ONE size the detector assumes
 TRUE_SIZE_M: dict[int, float] = {MARKER_C_ID: 0.021}
 
 TABLE_Z      = 0.0                 # markers lie flat at this height
-STATION_A_XY = (0.28, -0.12)
-STATION_B_XY = (0.28, +0.12)
-OBJECT_XY    = (0.26, -0.02)       # r≈0.26 — inside the straight-down IK
-                                   # envelope ([[Joint5 Reach Limit]]: r≈0.31+
-                                   # has no vertical IK; matches live layout)
+STATION_A_XY = (0.26, -0.02)       # directly under the object — realistic:
+                                   # the cube sits ON station A and covers it
+                                   # (pick_and_place no longer needs A at all)
+STATION_B_XY = (0.24, +0.10)       # place target — must be inside the
+                                   # straight-down envelope at pre-place
+                                   # height (probe 2026-07-16: x ≤ 0.26)
+OBJECT_XY    = (0.26, -0.02)       # on station A; r≈0.26 — inside the
+                                   # straight-down IK envelope (r≈0.31+ has
+                                   # no vertical IK)
 OBJECT_YAW_DEG = 20.0              # non-zero to exercise roll alignment
 
 NOISE_POS_STD_M   = 0.0015         # per-axis gaussian on detections

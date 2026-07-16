@@ -132,6 +132,8 @@ GRIPPER_SETTLE_S  = 2.0     # (sync)
 MARKER_FRESH_S       = 2.0
 MARKER_MEDIAN_WINDOW = 5
 WAIT_MARKERS_TIMEOUT_S = 60.0
+WAIT_OBJECT_TIMEOUT_S  = 60.0  # time to place the object after MAP succeeds
+                               # (anchors must be uncovered only during MAP)
 SIZE_CHECK_TOL = 0.15       # warn if fitted scale vs marker size is off >15%
 
 MAX_VELOCITY_SCALE = 0.10
@@ -675,8 +677,14 @@ class TopdownPickPlace(EihBaseNode):
             return False
 
         # ── LOCATE the object ──
+        # The map is fitted (anchors were uncovered above) — the object may
+        # be placed on station A only NOW; covering anchor 100 no longer
+        # matters. Prompt and give the user time to put it down.
         self.status('LOCATE: finding object marker C')
-        if not self.wait_for_ids([MARKER_C_ID], 15.0):
+        self._log('[LOCATE] Mapping done. Place the object (marker C) on '
+                  'station A now if it is not there yet — waiting up to '
+                  f'{WAIT_OBJECT_TIMEOUT_S:.0f}s.')
+        if not self.wait_for_ids([MARKER_C_ID], WAIT_OBJECT_TIMEOUT_S):
             self._log('Marker C (object) not visible to the phone.', 'ERROR')
             return False
         (cx, cy), yaw = self.marker_in_base(MARKER_C_ID)
