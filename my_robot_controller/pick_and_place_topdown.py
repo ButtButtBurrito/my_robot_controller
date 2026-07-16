@@ -93,10 +93,16 @@ PHONE_URL = ''
 
 # Anchor markers: id → measured centre (x, y) in base_link, metres. ≥3, not
 # collinear. 100/101 double as pick/place stations A/B.
+# PLACEHOLDERS — ruler-measure the taped layout and edit before a live run.
+# Siting rule (mock-IK probe grid, 2026-07-16): the straight-down TCP
+# ceiling is z≈0.075 (nothing reachable at 0.078). Pre-place TCP sits at
+# z=0.074 with the 0.03 cube + 0.04 clearance, where the envelope is only
+# x≈0.18–0.26 — keep station B (and A, since the cube starts there) at
+# x ≤ 0.26. REF is mapping-only, reach doesn't matter.
 ANCHORS = {
-    100: (0.36, 0.136),  # station A (pick side)
-    101: (0.36, -0.07),   # station B (place target)
-    102: (0.46,  0.00),   # REF — only for the mapping fit
+    100: (0.26,  0.10),   # station A (pick side)
+    101: (0.24, -0.10),   # station B (place target)
+    102: (0.38,  0.00),   # REF — only for the mapping fit
 }
 MARKER_A_ID = 100
 MARKER_B_ID = 101
@@ -137,7 +143,9 @@ OBJECT_ID = 'pick_object'
 TABLE_ID  = 'table_plane'
 
 # --no-phone injected scene (motion-only testing, e.g. mock hardware at home)
-INJECT_C_XY      = (0.30, -0.09)
+INJECT_C_XY      = (0.26, -0.02)   # r≈0.26 — inside the mock straight-down
+                                   # IK envelope (r≈0.31+ has no vertical IK;
+                                   # same tune as fake_marker_publisher)
 INJECT_C_YAW_DEG = 20.0
 
 DICT = cv2.aruco.Dictionary_get(cv2.aruco.DICT_ARUCO_ORIGINAL)
@@ -731,7 +739,15 @@ class TopdownPickPlace(EihBaseNode):
             return traj is not None
 
         # ── PICK ──
-        self.enable_control_gate()
+        if not self.enable_control_gate():
+            if isinstance(self.det, InjectedDetections):
+                self._log('[GATE] control_enable unavailable — OK for a '
+                          '--no-phone mock run (no arm driver), continuing.',
+                          'WARN')
+            else:
+                self._log('[GATE] control_enable failed — driver not ready. '
+                          'Aborting before any motion.', 'ERROR')
+                return False
         self._log(f'[PREVIEW] Moving in {CONFIRM_DELAY_S:.0f}s — check RViz now.')
         time.sleep(CONFIRM_DELAY_S)
 
