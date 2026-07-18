@@ -895,6 +895,10 @@ class PickAndPlaceNode(EihBaseNode):
         return True
 
     def shutdown(self):
+        # A GUI kill (SIGINT) mid-run can leave the object attached in MoveIt's
+        # planning scene, silently breaking every later plan. Best-effort clear;
+        # _apply_scene's own timeouts bound this within the GUI's 3 s grace.
+        self.scene_clear()
         for proc in (self._detector_proc, self._viewer_proc):
             if proc is not None and proc.poll() is None:
                 proc.terminate()
