@@ -506,12 +506,17 @@ class EihBaseNode(Node):
         control/joint_states 'gripper' dispatch. Blocks settle_s for motion."""
         width_m = float(np.clip(width_m, 0.0, GRIPPER_MAX_WIDTH_M))
         msg = JointState()
-        msg.header.stamp = self.get_clock().now().to_msg()
         msg.name = ['gripper']
         msg.position = [width_m]
-        self._gripper_pub.publish(msg)
         self._log(f'[GRIPPER] width ← {width_m:.3f} m')
-        time.sleep(settle_s)
+        # The driver's control/joint_states subscription is depth-1 and the
+        # MoveIt follow stream floods it at 200 Hz, so a single publish is
+        # routinely dropped — repeat at 10 Hz through the settle window.
+        deadline = time.monotonic() + max(settle_s, 0.5)
+        while time.monotonic() < deadline:
+            msg.header.stamp = self.get_clock().now().to_msg()
+            self._gripper_pub.publish(msg)
+            time.sleep(0.1)
 
     # ── Viz helpers (callers own ns/id assignment and publishing) ────────────
 
