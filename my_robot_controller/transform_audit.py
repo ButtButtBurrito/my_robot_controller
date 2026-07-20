@@ -87,7 +87,7 @@ MARKER_SIZE_M = 0.047
 # translation scales exactly linearly with the assumed size, so one detector
 # serves mixed sizes:  position ×= TRUE_SIZE_M[id] / MARKER_SIZE_M.
 # e.g. a future 0.021 m object marker:  TRUE_SIZE_M = {582: 0.021}
-TRUE_SIZE_M: dict[int, float] = {}
+TRUE_SIZE_M: dict[int, float] = {582: 0.021}   # cube marker C, 21 mm reprint
 
 # Tape-measured base-frame positions (m) to audit against, when you have
 # them. e.g. GROUND_TRUTH_XYZ = {100: (0.412, 0.136, 0.000)}
