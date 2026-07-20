@@ -42,11 +42,6 @@ from std_srvs.srv import SetBool
 from visualization_msgs.msg import Marker
 from tf2_ros import Buffer, StaticTransformBroadcaster, TransformListener
 
-try:                            # absent on the offline mock machine → open-loop
-    from agx_arm_msgs.msg import GripperStatus
-except ImportError:
-    GripperStatus = None
-
 MOVE_GROUP    = 'arm'
 EFFECTOR_LINK = 'link6'   # calibration and all tool offsets are relative to link6
 
@@ -55,8 +50,6 @@ EFFECTOR_LINK = 'link6'   # calibration and all tool offsets are relative to lin
 # grasp point sits a few cm beyond that. Verify in RViz and tune.
 GRIPPER_FINGER_MOUNT_Z = 0.1358
 GRIPPER_MAX_WIDTH_M    = 0.10     # 2 × 0.05 prismatic travel
-GRIPPER_CONFIRM_TOL_M  = 0.008    # width-feedback confirm window: must cover
-                                  # the grasp squeeze stall (~3 mm) + encoder noise
 
 JOINT_LIMITS = {
     'joint1': (-2.618,  2.618),
@@ -199,13 +192,6 @@ class EihBaseNode(Node):
         # GUI's Gripper Control panel uses).
         self._gripper_pub = self.create_publisher(JointState, 'control/joint_states', 10)
 
-        # Encoder width from the driver — lets set_gripper_width run closed-loop
-        # on hardware. None until the first message (e.g. the offline mock).
-        self._gripper_fb_width = None
-        if GripperStatus is not None:
-            self.create_subscription(GripperStatus, '/feedback/gripper_status',
-                                     self._on_gripper_status, 10)
-
         self._current_joint_state = None   # /feedback/joint_states (encoders)
         self.create_subscription(JointState, '/feedback/joint_states',
                                  self._on_joint_state, 10)
@@ -244,9 +230,6 @@ class EihBaseNode(Node):
 
     def _on_joint_state(self, msg: JointState):
         self._current_joint_state = msg
-
-    def _on_gripper_status(self, msg):
-        self._gripper_fb_width = msg.width
 
     def link6_in_base(self) -> tuple[np.ndarray, Rotation] | None:
         """Current link6 pose in base_link from robot TF (uncontested edge)."""
@@ -520,46 +503,20 @@ class EihBaseNode(Node):
 
     def set_gripper_width(self, width_m: float, settle_s: float = 1.5):
         """Command gripper opening (0.0 closed … 0.10 open) via the driver's
-        control/joint_states 'gripper' dispatch. Blocks settle_s for motion.
-        Closed-loop on hardware: republishes until the encoder width confirms
-        (the MoveIt follow stream floods the control topic at 200 Hz and
-        drops one-shot commands); a grasp stall inside GRIPPER_CONFIRM_TOL_M
-        counts as confirmed. Open-loop when no gripper feedback exists
-        (offline mock)."""
+        control/joint_states 'gripper' dispatch. Blocks settle_s for motion."""
         width_m = float(np.clip(width_m, 0.0, GRIPPER_MAX_WIDTH_M))
         msg = JointState()
         msg.name = ['gripper']
         msg.position = [width_m]
         self._log(f'[GRIPPER] width ← {width_m:.3f} m')
-
-        def _confirmed() -> bool:
-            fb = self._gripper_fb_width
-            return fb is not None and abs(fb - width_m) <= GRIPPER_CONFIRM_TOL_M
-
-        # The settle window doubles as the republish window.
+        # The driver's control/joint_states subscription is depth-1 and the
+        # MoveIt follow stream floods it at 200 Hz, so a single publish is
+        # routinely dropped — repeat at 10 Hz through the settle window.
         deadline = time.monotonic() + max(settle_s, 0.5)
         while time.monotonic() < deadline:
             msg.header.stamp = self.get_clock().now().to_msg()
             self._gripper_pub.publish(msg)
             time.sleep(0.1)
-
-        if self._gripper_fb_width is None or _confirmed():
-            return
-        # Feedback exists but disagrees — keep commanding for one extra window.
-        self._log(f'[GRIPPER] width NOT confirmed (feedback '
-                  f'{self._gripper_fb_width:.3f} vs commanded {width_m:.3f}) '
-                  '— retrying for 2 s', 'WARN')
-        deadline = time.monotonic() + 2.0
-        while time.monotonic() < deadline and not _confirmed():
-            msg.header.stamp = self.get_clock().now().to_msg()
-            self._gripper_pub.publish(msg)
-            time.sleep(0.1)
-        if _confirmed():
-            self._log('[GRIPPER] confirmed on retry')
-        else:
-            self._log(f'[GRIPPER] STILL not confirmed (feedback '
-                      f'{self._gripper_fb_width:.3f}) — check the hardware',
-                      'WARN')
 
     # ── Viz helpers (callers own ns/id assignment and publishing) ────────────
 
